@@ -1,0 +1,25 @@
+---
+- name: Install benchmark and report dependencies
+  ansible.builtin.apt:
+    name:
+      - busybox-static      # the image's only binary
+      - gcc                 # builds the tiny static pause binary
+      - libc6-dev
+      - skopeo              # copies the image into CRI-O's store
+      - librsvg2-bin        # renders the report charts
+      - fonts-dejavu-core
+      - fonts-inter
+    state: present
+
+- name: Build the benchmark image and load it into all three runtimes
+  ansible.builtin.command:
+    cmd: "{{ repo_dir }}/image/build.sh"
+  environment:
+    BENCH_IMAGE: "{{ bench_image }}"
+  register: bench_image_build
+  changed_when: "'already loaded' not in bench_image_build.stdout"
+
+- name: Run the preflight checks
+  ansible.builtin.command:
+    cmd: "{{ repo_dir }}/scripts/doctor.sh"
+  changed_when: false

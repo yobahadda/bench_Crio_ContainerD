@@ -1,0 +1,85 @@
+---
+# Follows https://github.com/cri-o/packaging (repo moved to download.opensuse.org isv:cri-o)
+
+- name: Download CRI-O's apt signing key
+  ansible.builtin.get_url:
+    url: "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ crio_version }}/deb/Release.key"
+    dest: /etc/apt/keyrings/cri-o.asc
+    mode: "0644"
+
+- name: Add CRI-O's apt repository
+  ansible.builtin.deb822_repository:
+    name: cri-o
+    types: [deb]
+    uris: "https://download.opensuse.org/repositories/isv:/cri-o:/stable:/{{ crio_version }}/deb/"
+    suites: ["/"]
+    signed_by: /etc/apt/keyrings/cri-o.asc
+
+- name: Install CRI-O and the CNI plugins
+  ansible.builtin.apt:
+    name:
+      - cri-o
+      - containernetworking-plugins
+    state: present
+    update_cache: true
+
+- name: Look for crictl
+  ansible.builtin.stat:
+    path: /usr/bin/crictl
+  register: crio_crictl_bin
+
+- name: Install crictl from the Kubernetes repo if CRI-O did not ship it
+  when: not crio_crictl_bin.stat.exists
+  block:
+    - name: Download the Kubernetes apt signing key
+      ansible.builtin.get_url:
+        url: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/Release.key"
+        dest: /etc/apt/keyrings/kubernetes.asc
+        mode: "0644"
+
+    - name: Add the Kubernetes apt repository
+      ansible.builtin.deb822_repository:
+        name: kubernetes
+        types: [deb]
+        uris: "https://pkgs.k8s.io/core:/stable:/{{ k8s_version }}/deb/"
+        suites: ["/"]
+        signed_by: /etc/apt/keyrings/kubernetes.asc
+
+    - name: Install cri-tools
+      ansible.builtin.apt:
+        name: cri-tools
+        state: present
+        update_cache: true
+
+- name: Configure CRI-O for the benchmark (runc by default, local pause image)
+  ansible.builtin.template:
+    src: 90-bench.conf.j2
+    dest: /etc/crio/crio.conf.d/90-bench.conf
+    mode: "0644"
+  notify: Restart crio
+
+- name: Give pods a loopback-only network (no bridge, no NAT)
+  ansible.builtin.copy:
+    src: 10-bench-loopback.conflist
+    dest: /etc/cni/net.d/10-bench-loopback.conflist
+    mode: "0644"
+  notify: Restart crio
+
+- name: Point crictl at CRI-O
+  ansible.builtin.copy:
+    dest: /etc/crictl.yaml
+    content: |
+      runtime-endpoint: unix:///var/run/crio/crio.sock
+      image-endpoint: unix:///var/run/crio/crio.sock
+      timeout: 30
+    mode: "0644"
+
+- name: Start CRI-O
+  ansible.builtin.systemd_service:
+    name: crio
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Apply config changes before the next role
+  ansible.builtin.meta: flush_handlers

@@ -1,0 +1,23 @@
+# {{ ansible_managed }}
+# CRI-O ships with crun as its default runtime. For a fair comparison the benchmark
+# runs CRI-O with the same runc binary that Docker and containerd use.
+# The packaged crun handler stays available (the "crio-crun" benchmark variant).
+
+[crio.runtime]
+default_runtime = "runc"
+
+[crio.runtime.runtimes.runc]
+runtime_path = "{{ runc_path }}"
+runtime_type = "oci"
+runtime_root = "/run/runc"
+# A drop-in replaces the whole handler table, so restate the packaged conmon path.
+monitor_path = "/usr/libexec/crio/conmon"
+
+[crio.image]
+# Use the local benchmark image as the pod sandbox, so no registry is needed.
+pause_image = "{{ bench_image }}"
+pause_command = "/pause"
+pinned_images = ["{{ bench_image }}"]
+
+[crio.network]
+plugin_dirs = ["/opt/cni/bin", "/usr/lib/cni"]

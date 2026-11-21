@@ -1,0 +1,7 @@
+results/*
+!results/.gitkeep
+ansible/inventory/remote.ini
+__pycache__/
+*.pyc
+.venv/
+.ansible/

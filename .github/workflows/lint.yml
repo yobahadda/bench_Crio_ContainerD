@@ -1,0 +1,20 @@
+name: lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: |
+          pip install ansible-core ansible-lint
+          sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Lint
+        run: make lint

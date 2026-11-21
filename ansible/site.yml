@@ -1,0 +1,20 @@
+---
+- name: Provision a container runtime benchmark machine
+  hosts: bench
+  become: true
+  pre_tasks:
+    - name: Check the OS is Ubuntu 24.04 or newer
+      ansible.builtin.assert:
+        that:
+          - ansible_distribution == "Ubuntu"
+          - ansible_distribution_version is version('24.04', '>=')
+        fail_msg: "This playbook targets Ubuntu 24.04+ (tested design: 26.04 / 26.10). Found {{ ansible_distribution }} {{ ansible_distribution_version }}."
+  roles:
+    - role: common
+      tags: [common]
+    - role: docker
+      tags: [docker]
+    - role: crio
+      tags: [crio]
+    - role: bench
+      tags: [bench]

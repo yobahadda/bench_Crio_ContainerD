@@ -1,0 +1,64 @@
+---
+# Follows https://docs.docker.com/engine/install/ubuntu/
+
+- name: Remove distro packages that conflict with Docker's own
+  ansible.builtin.apt:
+    name:
+      - docker.io
+      - docker-compose
+      - docker-compose-v2
+      - docker-doc
+      - podman-docker
+      - containerd
+      - runc
+    state: absent
+
+- name: Download Docker's apt signing key
+  ansible.builtin.get_url:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    dest: /etc/apt/keyrings/docker.asc
+    mode: "0644"
+
+- name: Add Docker's apt repository
+  ansible.builtin.deb822_repository:
+    name: docker
+    types: [deb]
+    uris: https://download.docker.com/linux/ubuntu
+    suites: ["{{ ansible_distribution_release }}"]
+    components: [stable]
+    architectures: ["{{ deb_arch }}"]
+    signed_by: /etc/apt/keyrings/docker.asc
+
+- name: Install Docker Engine, containerd and runc
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-buildx-plugin
+    state: present
+    update_cache: true
+
+- name: Start containerd and Docker
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: started
+    enabled: true
+  loop: [containerd, docker]
+
+- name: Let the benchmark user run docker without sudo
+  ansible.builtin.user:
+    name: "{{ bench_user }}"
+    groups: docker
+    append: true
+  when: bench_user | length > 0 and bench_user != 'root'
+
+- name: Check the shared runc binary exists
+  ansible.builtin.stat:
+    path: "{{ runc_path }}"
+  register: docker_runc_bin
+
+- name: Fail if runc is missing
+  ansible.builtin.assert:
+    that: docker_runc_bin.stat.exists
+    fail_msg: "{{ runc_path }} not found; containerd.io should provide it."

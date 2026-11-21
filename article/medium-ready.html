@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Is Docker Really Slower? (Medium-ready copy)</title>
+<style>
+  body { max-width: 720px; margin: 40px auto; padding: 0 20px; font: 19px/1.6 Georgia, serif; color: #1c1b19; background: #fff; }
+  .howto { font: 15px/1.5 system-ui, sans-serif; background: #fff4d6; border: 2px solid #e0a526; padding: 14px 18px; border-radius: 8px; margin-bottom: 40px; }
+  .howto ol { margin: 6px 0 0 18px; padding: 0; }
+  .img { font: 600 15px/1.4 system-ui, sans-serif; color: #d1402a; border: 2px dashed #d1402a; padding: 10px 14px; margin: 24px 0; }
+  pre { background: #f2f2f2; padding: 14px; overflow-x: auto; font-size: 15px; }
+  code { font-size: 0.9em; }
+</style>
+</head>
+<body>
+
+<div class="howto">
+  <strong>How to use this page.</strong> This yellow box is instructions only, so don't copy it.
+  <ol>
+    <li>Select everything from the title down to the end of Sources, copy it, and paste it into a new Medium story.</li>
+    <li>Wherever you see a red dashed box, delete it and upload that image from the <code>images</code> folder.</li>
+    <li>Click into each code block, delete it, type ``` to make a Medium code block, and paste the commands back in.</li>
+    <li>If you're updating the published story, the new parts are the "Update" section and the "caveats and how to run it yourself" section.</li>
+  </ol>
+</div>
+
+<h1>Is Docker Really Slower? Benchmarking Docker vs containerd vs CRI-O</h1>
+
+<h2>I benchmarked the three container runtimes on the same machine, with the same image and the same runc binary underneath. The answer surprised me.</h2>
+
+<p>There is a popular belief that Docker is "fast" and the Kubernetes runtimes are "heavy", or the reverse: that Docker is bloated and containerd or CRI-O is the lean, fast choice. Both stories skip one detail that changes the whole question.</p>
+
+<p><strong>Docker does not run your containers. containerd does.</strong> When you type <code>docker run</code>, the Docker daemon hands the job to containerd, which hands it to a small shim process, which calls runc. CRI-O takes a different path to the same runc. So asking "is Docker faster than containerd?" is a bit like asking whether a car is faster than its own engine. (Docker is that teammate who presents the group project that containerd quietly built.)</p>
+
+<p>The better question is: how much does each layer cost, and when is that cost worth paying? That's what I measured.</p>
+
+<h3>The stack: three front doors, one engine room</h3>
+
+<p>All three runtimes end at the same place: <strong>runc</strong>, the reference OCI runtime that actually creates namespaces and cgroups and starts your process. Kubernetes' own docs note that runc is the default low-level runtime for both containerd and CRI-O. What differs is how many layers sit in front of it.</p>
+
+<div class="img">[ IMAGE 01-stack-diagram.png ]</div>
+
+<p>Docker's path in one sentence: you ask dockerd, who asks containerd, who asks a shim, who finally asks runc to do the actual work. Very enterprise. Three layers of management for one <code>sleep</code> command.</p>
+
+<div class="img">[ IMAGE 02: your meme ]</div>
+
+<ul>
+  <li><strong>dockerd</strong> is the Docker Engine. It owns the developer experience: the REST API, <code>docker build</code> (BuildKit), networks, volumes, Compose. Since Docker Engine 29, new installs also use containerd's image store by default, so images and execution both live in containerd now.</li>
+  <li><strong>containerd</strong> is a general-purpose container daemon (CNCF graduated). It pulls images, manages snapshots, and supervises containers. It includes a CRI plugin, so the Kubernetes kubelet can talk to it directly.</li>
+  <li><strong>The shim</strong> (<code>containerd-shim-runc-v2</code>) is a small Go process that sits between containerd and each container. It keeps the container alive if containerd restarts.</li>
+  <li><strong>CRI-O</strong> is a daemon built for one job: implementing the Kubernetes Container Runtime Interface (CRI). Its releases track Kubernetes minor versions (CRI-O 1.34 for Kubernetes 1.34). It is the runtime behind Red Hat OpenShift.</li>
+  <li><strong>conmon</strong> is CRI-O's per-container monitor. It does the same job as containerd's shim, but it's written in C.</li>
+</ul>
+
+<p>Kubernetes removed its built-in Docker support (the <em>dockershim</em>) in v1.24. Since then, a Kubernetes node normally runs containerd or CRI-O directly, and Docker lives on developer laptops and CI machines.</p>
+
+<h3>The benchmark setup</h3>
+
+<p>Everything ran on one machine, with all three daemons running side by side and the same low-level runtime:</p>
+
+<ul>
+  <li><strong>Machine:</strong> 2 vCPU, 8 GB RAM cloud VM, Ubuntu 24.04, kernel 6.18, cgroup v1</li>
+  <li><strong>Docker Engine:</strong> 29.9.3 (containerd image store, overlayfs snapshotter)</li>
+  <li><strong>containerd:</strong> 2.4.2 (also the containerd that Docker uses)</li>
+  <li><strong>CRI-O:</strong> 1.34.14 with conmon 2.1.10, driven by crictl 1.34</li>
+  <li><strong>runc:</strong> 1.5.2, shared by all three</li>
+  <li><strong>Image:</strong> a 3 MB busybox image built <code>FROM scratch</code>, loaded into all three image stores</li>
+</ul>
+
+<p><strong>What I measured.</strong> <em>Start latency</em>: the time from invoking the CLI until it returns with the container running (a detached <code>sleep</code>). The image is already local, so no pulls. Cleanup happens outside the timed region. Each variant ran 50 times after 5 warm-up runs, and the order of variants was shuffled every round so background noise hits them all equally. I report the median and the 95th percentile (p95), not the mean.</p>
+
+<p>The six variants:</p>
+
+<ol>
+  <li><code>runc run -d</code>: the raw runtime with no daemon at all. This is the floor.</li>
+  <li><code>ctr run -d</code>: containerd's own debugging CLI.</li>
+  <li><code>docker run -d --network none</code>: Docker without networking, to isolate the engine cost.</li>
+  <li><code>docker run -d</code>: Docker with its default bridge network.</li>
+  <li><code>crictl create</code> + <code>crictl start</code> in an existing pod: how the kubelet starts a container in CRI-O.</li>
+  <li><code>crictl runp</code> + <code>create</code> + <code>start</code>: a brand-new Kubernetes-style pod (a sandbox with a pause container, then the app container).</li>
+</ol>
+
+<p>I also measured <strong>memory</strong>: each daemon's PSS (proportional set size, which splits shared pages fairly) when idle, and again with 20 idle containers running.</p>
+
+<h3>Result 1: start latency</h3>
+
+<p><strong>containerd was fastest (100 ms median), CRI-O came second (129 ms), and Docker came last (153 ms, or 167 ms with its default bridge network).</strong> The raw runc floor was 27 ms.</p>
+
+<p><em>Yes, the most famous container tool on the planet finished last. In its defense, it showed up carrying snacks: image builds, Compose, networks and volumes. containerd showed up with a gRPC socket and a dream.</em></p>
+
+<p>In the chart, the dot is the median and the line runs to the p95:</p>
+
+<div class="img">[ IMAGE 03-latency.png ]</div>
+
+<p>A few things stand out:</p>
+
+<ul>
+  <li><strong>Docker is not the fast one.</strong> It adds about 50 ms over plain containerd, and its default bridge network adds about 15 ms more (creating a veth pair and wiring it to <code>docker0</code>).</li>
+  <li><strong>The gaps are small in absolute terms.</strong> Among the three daemons, the slowest single-container path is about 1.7× the fastest, and every one of them is far below what a human notices at a terminal.</li>
+  <li><strong>CRI-O's "new pod" number (243 ms) is not a like-for-like comparison.</strong> It starts two containers: the pod's pause sandbox (a process whose entire job is to do nothing, professionally, forever) and your app. That's the real cost of a Kubernetes pod start, and it's the number to compare if you care about pod churn.</li>
+  <li><strong>Most of the cost is not runc.</strong> runc alone took 27 ms; everything above that is daemons, gRPC calls, shims, and CLI startup.</li>
+</ul>
+
+<h3>Result 2: memory</h3>
+
+<p><strong>With 20 containers running, CRI-O used 87 MB in total, containerd 140 MB, and Docker 240 MB.</strong> The ranking flips depending on what you count.</p>
+
+<p>When idle, containerd is the lightest daemon at 51 MB, then CRI-O at 79 MB. Docker needs both dockerd (101 MB) and containerd, so about 152 MB before you start anything.</p>
+
+<div class="img">[ IMAGE 04-memory.png ]</div>
+
+<p>Per container, the picture changes. Each containerd shim is a Go process using about 4.2 MB. Each CRI-O conmon is a C process using about 0.4 MB, roughly ten times less. Turns out you don't need a garbage collector to babysit a process that mostly sleeps. With 20 containers, that's 84–86 MB of shims for Docker and containerd against 8 MB of conmon for CRI-O.</p>
+
+<p>One caveat that matters in production: when containerd runs Kubernetes pods through its CRI plugin, the containers of one pod share a single shim. The per-container cost I measured (one container per shim, as <code>docker run</code> and <code>ctr run</code> do) is closer to a per-pod cost on a Kubernetes node.</p>
+
+<h3>Where Docker's extra 50 ms goes</h3>
+
+<p><strong>About 20 ms of Docker's extra time is its heavier <code>docker</code> CLI, and about 30 ms is dockerd's work on top of containerd.</strong> I split it by calling the Docker Engine API directly over its Unix socket, with no CLI process, and by timing each CLI binary doing nothing.</p>
+
+<div class="img">[ IMAGE 05-where-the-ms-go.png ]</div>
+
+<p>The measurements behind the split (medians):</p>
+
+<ul>
+  <li><code>docker run -d --network none</code> through the CLI: <strong>153 ms</strong></li>
+  <li>The same container through the raw Engine API (create + start): <strong>122 ms</strong></li>
+  <li><code>ctr run -d</code> through the CLI: <strong>100 ms</strong></li>
+  <li>The <code>docker</code> CLI starting up with no daemon call (<code>docker context show</code>): <strong>17 ms</strong></li>
+  <li>The <code>crictl</code> CLI starting up (<code>crictl --help</code>): <strong>14 ms</strong></li>
+  <li>The <code>ctr</code> CLI starting up (<code>ctr --help</code>): <strong>10 ms</strong></li>
+</ul>
+
+<p>Roughly:</p>
+
+<ul>
+  <li><strong>CLI cost (~30 ms, about 20 ms more than ctr's):</strong> the <code>docker</code> binary is bigger and slower to start than <code>ctr</code>, and <code>docker run</code> makes several API round trips (a version ping, create, then start).</li>
+  <li><strong>dockerd's own work (~30 ms):</strong> Docker's API at 122 ms against containerd's ~90 ms (100 ms minus its CLI startup). That pays for container config, the network sandbox, logging setup, and an extra gRPC hop.</li>
+  <li><strong>CRI-O sits in between:</strong> its 129 ms includes two separate <code>crictl</code> processes (create, then start), about 27 ms of CLI startup. The kubelet talks gRPC directly, so in a real cluster that part disappears.</li>
+</ul>
+
+<p>So the runtimes themselves are within about 30 ms of each other. Nearly half of Docker's famous "slowness" is the docker binary getting out of bed. Honestly, relatable. In a tight loop, the CLI you use matters about as much as the daemon behind it.</p>
+
+<h3>Update: I reran it on Apple Silicon, and crun stole the show</h3>
+
+<p>The first run left two big gaps: ARM and cgroup v2. So I reran the whole suite on an Ubuntu 26.04 VM on an Apple Silicon Mac: 4 vCPU, 6 GB RAM, cgroup v2, Docker 29.10.0, containerd 2.4.2, CRI-O 1.37.4 and runc 1.5.3, through the same kit you can run yourself (link below).</p>
+
+<p>This time I added a seventh variant: <strong>CRI-O as it ships</strong>. Since v1.31, CRI-O uses <strong>crun</strong> by default, a low-level runtime written in C, instead of runc (written in Go). For the main comparison I still force CRI-O onto the same runc as everyone else. The crun row shows what you get out of the box.</p>
+
+<div class="img">[ IMAGE 07-arm-latency.png ]</div>
+
+<ul>
+  <li><strong>CRI-O with crun: 31 ms.</strong> The fastest of all, ahead of containerd (37 ms).</li>
+  <li><strong>CRI-O with runc: 48 ms.</strong> Same CRI-O, same pod; the only change is the low-level runtime, and it costs 16 ms.</li>
+  <li><strong>Docker: 63 ms</strong> (80 ms with the bridge network). Still last.</li>
+  <li><strong>A brand-new CRI-O pod: 80 ms</strong>, the same as a single <code>docker run</code> with networking.</li>
+  <li><strong>runc alone: 13 ms.</strong></li>
+</ul>
+
+<p>Here's the surprise: <strong>swapping runc for crun saved more time (16 ms) than dockerd costs (14 ms).</strong> We spend a lot of energy arguing about which daemon to run, while the small binary at the bottom of the stack moves the needle just as much. A short smoke run before the full one gave the same order (crun 34 ms, containerd 35 ms, CRI-O with runc 44 ms), so it's not a one-off. It is one machine, though.</p>
+
+<p>The rest of the story holds, just faster. Everything ran about 2–3× quicker than on the small cloud VM, and the ranking of the three daemons didn't change. Docker's extra cost over containerd shrank to about 25 ms, roughly half dockerd (14 ms) and half its CLI (about 11 ms more than <code>ctr</code>):</p>
+
+<div class="img">[ IMAGE 08-arm-where-the-ms-go.png ]</div>
+
+<p>Memory went the same way, only more so. With 20 containers: Docker 279 MB, containerd 180 MB, CRI-O 72 MB. A containerd shim still costs about 3.8 MB per container; a CRI-O conmon was down to about 0.1 MB.</p>
+
+<div class="img">[ IMAGE 09-arm-memory.png ]</div>
+
+<p>One thing I couldn't confirm: on this machine, running all three daemons side by side versus one at a time moved the medians by up to 15 ms in both directions, which is noise, not a pattern. So for this run I'd trust the ranking, not the isolation result.</p>
+
+<h3>So which one should you use?</h3>
+
+<p><strong>Pick by job, not by milliseconds.</strong> A 30–50 ms difference per container start rarely decides anything. What each tool is built for does. Picking a runtime to save 50 ms is like buying a sports car to get through red lights faster.</p>
+
+<div class="img">[ IMAGE 06-which-to-use.png ]</div>
+
+<p><strong>Use Docker</strong> on your laptop, in CI, and on single servers. You get image builds, Compose, a friendly CLI and the biggest ecosystem. Its overhead buys you features you actually use there.</p>
+
+<p><strong>Use containerd</strong> as the runtime of a Kubernetes node (it's the default on most managed clusters and in k3s and kind), or when you build your own platform and want a stable, embeddable daemon. Pair it with <code>nerdctl</code> if you want a Docker-like CLI without dockerd.</p>
+
+<p><strong>Use CRI-O</strong> when the node exists only to run Kubernetes and you want the smallest surface: nothing that Kubernetes doesn't need, versions locked to your Kubernetes release, and the lowest per-container memory. It's the natural choice on OpenShift and in Red Hat-based stacks. And keep its default crun: on my ARM run it was the fastest way to start a container.</p>
+
+<p><strong>Don't switch runtimes for speed alone.</strong> If pod start time hurts, look first at image size and pull time, CNI setup, and init containers. In my test, a new pod's sandbox cost more than the whole difference between the three daemons.</p>
+
+<h3>In short: caveats and how to run it yourself</h3>
+
+<p>Two machines now: a small x86 cloud VM (2 vCPUs, cgroup v1) and an Apple Silicon VM (4 vCPUs, cgroup v2). The ranking held on both; the milliseconds didn't, so trust the ranking more than the exact numbers. Benchmarks are like horoscopes: oddly specific, and not about your production cluster.</p>
+
+<ul>
+  <li><strong>Not measured:</strong> image pulls, real workloads, concurrent starts, bare metal.</li>
+  <li><strong>CLI startup is included</strong> in the timings; the kubelet never pays it.</li>
+  <li><strong>CRI-O 1.34</strong> built from source on the first machine, the packaged CRI-O 1.37 on the second; Docker shares containerd, so its memory includes containerd's.</li>
+</ul>
+
+<p>The kit is on GitHub at <a href="https://github.com/yobahadda/bench_Crio_ContainerD">github.com/yobahadda/bench_Crio_ContainerD</a>. On a fresh Ubuntu 24.04+ VM, one Ansible playbook installs all three runtimes, and the whole suite runs in 3 to 10 minutes depending on the machine:</p>
+
+<pre><code>git clone https://github.com/yobahadda/bench_Crio_ContainerD.git
+cd bench_Crio_ContainerD
+make provision &amp;&amp; make doctor &amp;&amp; make bench</code></pre>
+
+<p>Got different numbers, especially on bare metal or a bigger machine? Tell me in the comments. Same numbers? Tell me too. I need someone to talk to lol.</p>
+
+<h3>Sources</h3>
+
+<ul>
+  <li><a href="https://kubernetes.io/blog/2022/02/17/dockershim-faq">Kubernetes: Dockershim removal FAQ</a> (dockershim removed in v1.24; runc is the default for containerd and CRI-O)</li>
+  <li><a href="https://kubernetes.io/blog/2022/05/03/kubernetes-1-24-release-announcement/">Kubernetes 1.24 release announcement</a></li>
+  <li><a href="https://www.docker.com/blog/docker-engine-version-29/">Docker Engine v29: containerd image store becomes the default</a></li>
+  <li><a href="https://docs.docker.com/engine/storage/containerd">Docker docs: containerd image store with Docker Engine</a></li>
+  <li><a href="https://containerd.io/releases/">containerd releases and Kubernetes support matrix</a></li>
+  <li><a href="https://github.com/cri-o/cri-o">CRI-O on GitHub</a> (CRI-O versions track Kubernetes minor versions)</li>
+</ul>
+
+</body>
+</html>

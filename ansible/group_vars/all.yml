@@ -1,0 +1,30 @@
+---
+# Every version the benchmark depends on lives here.
+
+# CRI-O release stream from download.opensuse.org/repositories/isv:/cri-o
+crio_version: "v1.37"
+
+# Kubernetes stream used only to install crictl (cri-tools) if CRI-O's package lacks it
+k8s_version: "v1.37"
+
+# All runtimes run containers with this runc binary (shipped by Docker's containerd.io)
+runc_path: /usr/bin/runc
+
+# CRI-O defaults to crun since v1.31. Keep it registered as an extra runtime handler
+# so the benchmark can also measure "CRI-O as shipped".
+crio_enable_crun_handler: true
+
+# Debian architecture name (amd64 / arm64), used for Docker's apt repo
+deb_arch: "{{ {'x86_64': 'amd64', 'aarch64': 'arm64'}[ansible_architecture] | default(ansible_architecture) }}"
+
+# Benchmark image, loaded into all three image stores
+bench_image: localhost/bench:1
+
+# Where the repo lives on the VM (set by scripts/bootstrap.sh)
+repo_dir: "{{ playbook_dir | dirname }}"
+
+# Add this user to the docker group (empty = skip)
+bench_user: "{{ ansible_env.SUDO_USER | default(ansible_user_id) }}"
+
+# Reduce background noise during benchmarks
+disable_unattended_upgrades: true
