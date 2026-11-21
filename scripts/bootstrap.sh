@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # One command to provision a fresh Ubuntu VM from inside it:
-#   git clone <repo> && cd runtime-bench && sudo ./scripts/bootstrap.sh
+#   git clone <repo> && cd bench_Crio_ContainerD && sudo ./scripts/bootstrap.sh
 set -euo pipefail
 
 [[ $EUID -eq 0 ]] || { echo "run with sudo: sudo $0" >&2; exit 1; }
